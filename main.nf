@@ -1,124 +1,145 @@
 #!/usr/bin/env nextflow
 
 /*
+vim: syntax=groovy
+-*- mode: groovy;-*-
 ========================================================================================
-                                         miRNA 
+          N G I    S M A L L    R N A - S E Q    B E S T    P R A C T I C E
 ========================================================================================
- miRNA  Analysis Pipeline. Started May 2016.
- @Authors
+ Small-RNA-Seq Best Practice Analysis Pipeline. Started May 2016.
+ #### Homepage / Documentation
+ https://github.com/SciLifeLab/NGI-smRNAseq
+ #### Authors
+ Phil Ewels <phil.ewels@scilifelab.se>
+ Chuan Wang <chuan.wang@scilifelab.se>
  Rickard Hammarén <rickard.hammaren@scilifelab.se>
 ----------------------------------------------------------------------------------------
- Basic command:
- $ nextflow main.nf
- 
- Pipeline variables can be configured with the following command line options:
- --genome [GRCh37 | GRCm38]
- --index [path to STAR index]
- --gtf [path to GTF file]
- --files [path to input files]
- 
- For example:
- $ nextflow rnaseq.nf --files path/to/data/*fq.gz
-----------------------------------------------------------------------------------------
- Pipeline overview:
- - MultiQC
-----------------------------------------------------------------------------------------
- GA project GA_14_20 RNA-Seq Pipeline. See planning document:
- https://docs.google.com/document/d/1_I4r-yYLl_nA5SzMKtABjDKxQxHSb5N9FMWyomVSWVU/edit#heading=h.uc2543wvne80
-----------------------------------------------------------------------------------------
 */
+
 /*
  * SET UP CONFIGURATION VARIABLES
  */
 
 // Pipeline version
-version = 0.1
+version = 1.4
 
-// Reference genome index
-params.genome = 'GRCh37'
-params.gtf   = params.genomes[ params.genome ].gtf
-params.bed12 = params.genomes[ params.genome ].bed12
-params.bowtie2 = params.genomes[ params.genome ].bowtie2
-params.bowtie_miRBase_mature = params.genomes.bowtie_miRBase_mature
-params.bowtie_miRBase_hairpin = params.genomes.bowtie_miRBase_hairpin
-params.bowtie_rfam = params.genomes.bowtie_rfam
+// Configurable variables
+params.genome = false
+params.gtf = params.genome ? params.genomes[ params.genome ].gtf ?: false : false
+params.bt2index = params.genome ? params.genomes[ params.genome ].bowtie2 ?: false : false
+params.mature = params.genome ? params.genomes[ params.genome ].mature ?: false : false
+params.hairpin = params.genome ? params.genomes[ params.genome ].hairpin ?: false : false
 params.name = "miRNA-Seq Best practice"
+params.saveReference = false
+params.reads = "data/*.fastq.gz"
+params.outdir = './results'
 
-// Input files
-params.input = "data/*.fastq.gz"
-
-// Output path
-params.out = "$PWD"
+// Check that we have a mature / hairpin reference
+if( !params.mature || !params.hairpin ){
+    exit 1, "Missing mature / hairpin reference indexes! Is --genome specified?"
+}
 
 // R library locations
 params.rlocation = "$HOME/R/nxtflow_libs/"
 nxtflow_libs=file(params.rlocation)
-
-log.info "===================================="
-log.info " RNAbp : Small RNA-Seq Best Practice v${version}"
-log.info "===================================="
-log.info "Reads        : ${params.input}"
-log.info "Genome       : ${params.genome}"
-log.info "Index        : ${params.index}"
-log.info "Annotation   : ${params.gtf}"
-log.info "miRBase mature  : ${params.bowtie_miRBase_mature}"
-log.info "miRBase hairpin : ${params.bowtie_miRBase_hairpin}"
-log.info "Rfam         : ${params.bowtie_rfam}"
-log.info "Current home : $HOME"
-log.info "Current user : $USER"
-log.info "Current path : $PWD"
-log.info "R libraries  : ${params.rlocation}"
-log.info "Script dir   : $baseDir"
-log.info "Working dir  : $workDir"
-log.info "Output dir   : ${params.out}"
-log.info "===================================="
-
-// Create R library directories if not already existing
 nxtflow_libs.mkdirs()
 
+log.info "==========================================="
+log.info " RNAbp : Small RNA-Seq Best Practice v${version}"
+log.info "==========================================="
+log.info "Reads                : ${params.reads}"
+if(params.genome)   log.info "Genome               : ${params.genome}"
+if(params.bt2index) log.info "Bowtie2 Index        : ${params.bt2index}"
+if(params.gtf)      log.info "Annotation           : ${params.gtf}"
+log.info "miRBase mature       : ${params.mature}"
+log.info "miRBase hairpin      : ${params.hairpin}"
+log.info "Current user         : $USER"
+log.info "Current path         : $PWD"
+log.info "Script dir           : $baseDir"
+log.info "R libraries          : ${params.rlocation}"
+log.info "Output dir           : ${params.outdir}"
+log.info "Config Profile       : ${workflow.profile}"
+log.info "==========================================="
+
 // Set up nextflow objects
-index = file(params.index)
-gtf   = file(params.gtf)
-bed12 = file(params.bed12)
-bowtie=file(params.bowtie)
 
 // Validate inputs
-if( !bowtie_miRBase_mature.exists() ) exit 1, "Missing Bowtie 1 miRBase_mature index: ${bowtie_miRBase_mature}"
-if( !bowtie_miRBase_hairpin.exists() ) exit 1, "Missing Bowtie 1 miRBase_hairpin index: ${bowtie_miRBase_hairpin}"
-if( !bowtie_rfam.exists() ) exit 1, "Missing Bowtie 1 rfam index: ${bowtie_rfam}"
-if( !bowtie2.exists() ) exit 1, "Missing Bowtie 2 index: ${bowtie2}"
-if( !gtf.exists() )   exit 2, "Missing GTF annotation: ${gtf}"
-if( !bed12.exists() ) exit 2, "Missing BED12 annotation: ${bed12}"
+if( params.mature ){
+    mature = file(params.mature)
+    if( !mature.exists() ) exit 1, "Mature file not found: ${params.mature}"
+}
+if( params.hairpin ){
+    hairpin = file(params.hairpin)
+    if( !hairpin.exists() ) exit 1, "Hairpin file not found: ${params.hairpin}"
+}
+if( params.gtf ){
+    gtf = file(params.gtf)
+    if( !gtf.exists() ) exit 1, "GTF file not found: ${params.gtf}"
+}
+if( params.bt2index ){
+    bt2_index = file("${params.bt2index}.1.bt2")
+    bt2_indices = Channel.fromPath( "${params.bt2index}*" ).toList()
+    if( !bt2_index.exists() ) exit 1, "Reference genome Bowtie 2 not found: ${params.bt2index}"
+}
+if( !params.gtf || !params.bt2index) {
+    log.info "No GTF / Bowtie2 index supplied - host reference genome analysis will be skipped."
+}
+if( workflow.profile == 'standard' && !params.project ) exit 1, "No UPPMAX project ID found! Use --project"
 
-// Setting up a directory to save results to 
-results_path = './results'
 
-dataset = Channel.fromPath(params.input)
-dataset.into { fastQC_input; trimgalore_input }  
+/*
+ * Create a channel for input read files
+ */
+Channel
+    .fromPath( params.reads )
+    .ifEmpty { error "Cannot find any reads matching: ${params.reads}" }
+    .into { raw_reads_fastqc; raw_reads_trimgalore }
+
+
+/*
+ * PREPROCESSING - Build Bowtie index for mature and hairpin
+ */
+process makeBowtieIndex {
+
+    publishDir path: { params.saveReference ? "${params.outdir}/bowtie/reference" : params.outdir },
+               saveAs: { params.saveReference ? it : null }, mode: 'copy'
+
+    input:
+    file mature from mature
+    file hairpin from hairpin
+
+    output:
+    file 'mature_idx.*' into mature_index
+    file 'hairpin_idx.*' into hairpin_index
+
+    script:
+    """
+    fasta_formatter -w 0 -i $mature -o mature_igenome.fa
+    fasta_nucleotide_changer -d -i mature_igenome.fa -o mature_idx.fa
+    bowtie-build mature_idx.fa mature_idx
+    fasta_formatter -w 0 -i $hairpin -o hairpin_igenome.fa
+    fasta_nucleotide_changer -d -i hairpin_igenome.fa -o hairpin_idx.fa
+    bowtie-build hairpin_idx.fa hairpin_idx
+    """
+}
+
 
 /*
  * STEP 1 - FastQC
  */
-
 process fastqc {
-    tag "reads: $reads"
-
-    module 'bioinfo-tools'
-    module 'FastQC'
-
-    memory '2 GB'
-    time '1h'
-
-    publishDir "$results_path/fastqc"
+    tag "$reads"
+    publishDir "${params.outdir}/fastqc", mode: 'copy'
 
     input:
-    file reads from fastQC_input
-    output:
-    file '*_fastqc.html' into fastqc_html
-    file '*_fastqc.zip' into fastqc_zip
+    file reads from raw_reads_fastqc
 
+    output:
+    file '*_fastqc.{zip,html}' into fastqc_results
+
+    script:
     """
-    fastqc -q ${reads}
+    fastqc -q $reads
     """
 }
 
@@ -126,432 +147,230 @@ process fastqc {
 /*
  * STEP 2 - Trim Galore!
  */
-
 process trim_galore {
-    tag "reads: $reads"
-
-    module 'bioinfo-tools'
-    module 'FastQC'
-    module 'cutadapt'
-    module 'TrimGalore'
-
-    cpus 3
-    memory '3 GB'
-    time '8h'
-
-    publishDir "$results_path/trim_galore"
+    tag "$reads"
+    publishDir "${params.outdir}/trim_galore", mode: 'copy'
 
     input:
-    file(reads) from trimgalore_input
+    file reads from raw_reads_trimgalore
 
     output:
-    file '*fq.gz' into trimmed_reads, trimmed_reads_miRdeep2
-    file '*trimming_report.txt' 
-    
-    script:
-    /* Trim Galore should automatically detect the small RNA adapter sequence */
-    """
-    trim_galore --gzip --fastqc_args "-q" ${reads}
-    """
-}
-
-
-/*
- * STEP 3 - Bowtie against miRBase mature RNA
- */
-process bowtie_miRBase_mature {
-    
-    module 'bioinfo-tools'
-    module 'bowtie'
-    module 'samtools'
-    
-    memory '2 GB'
-    time '6h'
-
-    input:
-    file(reads:'*') from trimmed_reads 
-    
-    output:
-    file '*.bam' into miRBase_mature_bam 
-   
-    """
-    f='$reads';f=(\$f);f=\${f[0]};f=\${f%.gz};f=\${f%.fastq};f=\${f%.fq};f=\${f%_val_1};f=\${f%_trimmed};f=\${f%_1}
-    bowtie \
-        -p 2 \
-        -t \
-        -n 0 \
-        -l 15 \
-        -e 99999 \
-        -k 200 \
-        --best \
-        -S \
-        --chunkmbs 2048 \
-        $bowtie_miRBase_mature \
-        $reads \
-        | samtools view -bS > \${f}.aligned_miRBase_mature.bam 
-    """
-}
-
-
-/*
- * STEP 3 - Bowtie against miRBase hairpin RNA
- */
-process bowtie_miRBase_mature {
-    
-    module 'bioinfo-tools'
-    module 'bowtie'
-    module 'samtools'
-    
-    memory '2 GB'
-    time '6h'
-
-    input:
-    file(reads:'*') from trimmed_reads 
-    
-    output:
-    file '*.bam' into miRBase_hairpin_bam
-   
-    """
-    f='$reads';f=(\$f);f=\${f[0]};f=\${f%.gz};f=\${f%.fastq};f=\${f%.fq};f=\${f%_val_1};f=\${f%_trimmed};f=\${f%_1}
-    bowtie \
-        -p 2 \
-        -t \
-        -n 0 \
-        -l 15 \
-        -e 99999 \
-        -k 200 \
-        --best \
-        -S \
-        --chunkmbs 2048 \
-        $bowtie_miRBase_hairpin \
-        $reads \
-        | samtools view -bS > \${f}.aligned_miRBase_hairpin.bam 
-    """
-}
-
-
-
-/*
- * STEP 3 - Bowtie against rfam
- */
-process bowtie_rfam {
-    
-    module 'bioinfo-tools'
-    module 'bowtie'
-    module 'samtools'
-    
-    memory '2 GB'
-    time '6h'
-
-    input:
-    file(reads:'*') from trimmed_reads 
-    
-    output:
-    file '*.bam' into rfam_bam
-   
-    """
-    f='$reads';f=(\$f);f=\${f[0]};f=\${f%.gz};f=\${f%.fastq};f=\${f%.fq};f=\${f%_val_1};f=\${f%_trimmed};f=\${f%_1}
-    bowtie \
-        -p 2 \
-        -t \
-        -n 0 \
-        -l 15 \
-        -e 99999 \
-        -k 200 \
-        --best \
-        -S \
-        --chunkmbs 2048 \
-        $bowtie_rfam \
-        $reads \
-        | samtools view -bS > \${f}.aligned_rfam.bam 
-    """
-}
-
-
-
-/*
- * STEP 3 - Samtools idxstats to count bowtie 1 alignments
- */
-process samtools_idxstats {
-    
-    module 'bioinfo-tools'
-    module 'samtools'
-    
-    memory '8 GB'
-    time '6h'
-
-    input:
-    file '*.bam' from miRBase_mature_bam
-    // TODO: WORK OUT HOW TO GET ALL THREE CHANNELS TO COME HERE
-    // ALSO: miRBase_hairpin_bam, rfam_bam 
-    
-    output:
-    file '*.counts.txt' into samtools_counts
-    file '*.sorted.bam'
-    file '*.sorted.bam.bai'
-   
-    """
-    samtools sort $miRBase_mature_bam > ${miRBase_mature_bam}.sorted.bam
-    samtools index ${miRBase_mature_bam}.sorted.bam
-    samtools idxstats ${miRBase_mature_bam}.sorted.bam > ${miRBase_mature_bam}_counts.txt
-    """
-    
-}
-
-
-
-/*
- * STEP 3 - Bowtie 2 against host genome
- */
-process bowtie2 {
-    
-    module 'bioinfo-tools'
-    module 'bowtie2'
-    module 'samtools'
-    
-    memory '8 GB'
-    time '6h'
-
-    input:
-    file(reads:'*') from trimmed_reads 
-    
-    output:
-    file '*.bam' into bowtie2_bam
-   
-    """
-    f='$reads';f=(\$f);f=\${f[0]};f=\${f%.gz};f=\${f%.fastq};f=\${f%.fq};f=\${f%_val_1};f=\${f%_trimmed};f=\${f%_1}
-    bowtie2 \
-        -p 1 \
-        -t \
-        -x $bowtie2 \
-        -U $reads \
-        | samtools view -bS > \${f}.aligned_${params.genome}.bam 
-    """
-}
-
-
-
-/*
- * Filter aligned reads based on alignment length
- */
-process bowtie2 {
-    
-    module 'bioinfo-tools'
-    module 'NGSUtils'
-    
-    memory '8 GB'
-    time '6h'
-
-    input:
-    file '*.bam' from bowtie2_bam 
-    
-    output:
-    file '*_filtered.bam' into bowtie2_bam_16_30nt
-   
-    """
-    bamutils filter \
-        $bowtie2_bam \
-        ${bowtie2_bam}_filtered.bam \
-        -minlen 16 \
-        -maxlen 30 \
-        -mapped
-    """
-}
-
-/*
- * STEP 5 -  Feature counts
- */
-
-
-process featureCounts {
-    
-    module 'bioinfo-tools'
-    module 'subread'
-    
-    memory '4 GB'
-    time '2h'
-    
-    publishDir "$results_path/featureCounts"
-    input:
-    file '*.bam' from bowtie2_bam
-    file gtf from gtf
-    
-    output:
-    file '*_gene.featureCounts.txt' 
-    file '*_biotype.featureCounts.txt' 
-    file '*_rRNA_counts.txt' 
-    file '*.summary' 
-    file 'featureCounts.done' into featureCounts_done    
-    """
-    featureCounts -a $gtf -g gene_id -o ${bam}_gene.featureCounts.txt -p -s 2 $bowtie2_bam
-    featureCounts -a $gtf -g gene_biotype -o ${bam}_biotype.featureCounts.txt -p -s 2 $bowtie2_bam
-    cut -f 1,7 ${bam}_biotype.featureCounts.txt | sed '1,2d' | grep 'rRNA' > ${bam}_rRNA_counts.txt
-    echo done >featureCounts.done
-    """
-}
-
-
-
-
-
-/*
- * STEP 10 - edgeR MDS and heatmap
- */
-/*
-///////////////////////////////////////
-// UNDER DEVELOPMENT
-// Should still work the same as the mRNA pipeline though..?
-///////////////////////////////////////
-
-
-process sample_correlation {
-    module 'bioinfo-tools'
-    module 'R/3.2.3'
-    
-    memory { 16.GB * task.attempt }
-    time { 2.h * task.attempt }
-    errorStrategy { task.exitStatus == 143 ? 'retry' : 'finish' }
-    maxRetries 3
-    maxErrors '-1'
-    
-    publishDir "${params.outdir}/sample_correlation", mode: 'copy'
-    
-    input:
-    file input_files from geneCounts.toList()
-    bam_count
-    
-    output:
-    file '*.{txt,pdf}' into sample_correlation_results
-    
-    when:
-    num_bams > 2 && (!params.sampleLevel)
+    file '*.gz' into trimmed_reads_bowtie, trimmed_reads_bowtie2
+    file '*trimming_report.txt' into trimgalore_results
 
     script:
     """
-    #!/usr/bin/env Rscript
-    
-    # Load / install required packages
-    .libPaths( c( "${params.rlocation}", .libPaths() ) )
-    if (!require("limma")){
-        source("http://bioconductor.org/biocLite.R")
-        biocLite("limma", suppressUpdates=TRUE, lib="${params.rlocation}")
-        library("limma")
-    }
-    
-    if (!require("edgeR")){
-        source("http://bioconductor.org/biocLite.R")
-        biocLite("edgeR", suppressUpdates=TRUE, lib="${params.rlocation}")
-        library("edgeR")
-    }
-    
-    if (!require("data.table")){
-        install.packages("data.table", dependencies=TRUE, repos='http://cloud.r-project.org/', lib="${params.rlocation}")
-        library("data.table")
-    }
-    
-    if (!require("gplots")) {
-        install.packages("gplots", dependencies=TRUE, repos='http://cloud.r-project.org/', lib="${params.rlocation}")
-        library("gplots")
-    }
-    
-    # Load input counts data
-    datafiles = c( "${(input_files as List).join('", "')}" )
-    
-    # Load count column from all files into a list of data frames
-    # Use data.tables fread as much much faster than read.table
-    # Row names are GeneIDs
-    temp <- lapply(datafiles, fread, skip="Geneid", header=TRUE, colClasses=c(NA, rep("NULL", 5), NA))
-    
-    # Merge into a single data frame
-    merge.all <- function(x, y) {
-        merge(x, y, all=TRUE, by="Geneid")
-    }
-    data <- data.frame(Reduce(merge.all, temp))
-    
-    # Clean sample name headers
-    colnames(data) <- gsub("Aligned.sortedByCoord.out.bam", "", colnames(data))
-    
-    # Set GeneID as row name
-    rownames(data) <- data[,1]
-    data[,1] <- NULL
-    
-    # Convert data frame to edgeR DGE object
-    dataDGE <- DGEList( counts=data.matrix(data) )
-    
-    # Normalise counts
-    dataNorm <- calcNormFactors(dataDGE)
-    
-    # Make MDS plot
-    pdf('edgeR_MDS_plot.pdf')
-    MDSdata <- plotMDS(dataNorm)
-    dev.off()
-    
-    # Print distance matrix to file
-    write.table(MDSdata\$distance.matrix, 'edgeR_MDS_distance_matrix.txt', quote=FALSE, sep="\t")
-    
-    # Print plot x,y co-ordinates to file
-    MDSxy = MDSdata\$cmdscale.out
-    colnames(MDSxy) = c(paste(MDSdata\$axislabel, '1'), paste(MDSdata\$axislabel, '2'))
-    write.table(MDSxy, 'edgeR_MDS_plot_coordinates.txt', quote=FALSE, sep="\t")
-    
-    # Get the log counts per million values
-    logcpm <- cpm(dataNorm, prior.count=2, log=TRUE)
-    
-    # Calculate the euclidean distances between samples
-    dists = dist(t(logcpm))
-    
-    # Plot a heatmap of correlations
-    pdf('log2CPM_sample_distances_heatmap.pdf')
-    hmap <- heatmap.2(as.matrix(dists),
-      main="Sample Correlations", key.title="Distance", trace="none",
-      dendrogram="row", margin=c(9, 9)
-    )
-    dev.off()
-    
-    # Plot the heatmap dendrogram
-    pdf('log2CPM_sample_distances_dendrogram.pdf')
-    plot(hmap\$rowDendrogram, main="Sample Dendrogram")
-    dev.off()
-    
-    # Write clustered distance values to file
-    write.table(hmap\$carpet, 'log2CPM_sample_distances.txt', quote=FALSE, sep="\t")
-    
-    file.create("corr.done")
+    trim_galore --small_rna --gzip $reads
     """
 }
 
 
-*/
-
-
-
-
-
 /*
- * STEP 4
+ * STEP 3 - Bowtie miRBase mature miRNA
  */
-/*
-//////////////////////////////////
-// Under development
-//////////////////////////////////
-process miRdeep2{
+process bowtie_miRBase_mature {
+    tag "$reads"
+    publishDir "${params.outdir}/bowtie/miRBase_mature", mode: 'copy', pattern: '*.mature_unmapped.fq.gz'
 
-    module 'Bioinfo-tools'
-    module 'mirdeep2'
-
-    cpus 4
-    memory '16 GB'
     input:
-    //file (reads:'*') from trimmed_reads_miRdeep2
-    
+    file reads from trimmed_reads_bowtie
+    file index from mature_index
+
     output:
-    file '*.reads' into mapper_output
+    file '*.mature.bam' into miRBase_mature_bam
+    file '*.mature_unmapped.fq.gz' into mature_unmapped_reads
+
+    script:
+    index_base = index.toString().tokenize(' ')[0].tokenize('.')[0]
+    prefix = reads.toString() - ~/(.R1)?(_R1)?(_trimmed)?(\.fq)?(\.fastq)?(\.gz)?$/
     """
-    mapper.pl -e $reads -p params.genome -s ${reads}.reads -t ${reads}.mapping  
-    """ 
+    bowtie \\
+        $index_base \\
+        -q <(zcat $reads) \\
+        -p 2 \\
+        -t \\
+        -n 0 \\
+        -l 15 \\
+        -e 99999 \\
+        -k 10 \\
+        --best \\
+        --chunkmbs 2048 \\
+        --un ${prefix}.mature_unmapped.fq \\
+        -S \\
+        | samtools view -bS - > ${prefix}.mature.bam
+
+    gzip ${prefix}.mature_unmapped.fq
+    """
 }
-*/
+
+/*
+ * STEP 4 - Bowtie against miRBase hairpin
+ */
+process bowtie_miRBase_hairpin {
+    tag "$reads"
+    publishDir "${params.outdir}/bowtie/miRBase_hairpin", mode: 'copy', pattern: '*.hairpin_unmapped.fq.gz'
+
+    input:
+    file reads from mature_unmapped_reads
+    file index from hairpin_index
+
+    output:
+    file '*.hairpin.bam' into miRBase_hairpin_bam
+    file '*.hairpin_unmapped.fq.gz' into hairpin_unmapped_reads
+
+    script:
+    index_base = index.toString().tokenize(' ')[0].tokenize('.')[0]
+    prefix = reads.toString() - '.mature_unmapped.fq.gz'
+    """
+    bowtie \\
+        $index_base \\
+        -p 2 \\
+        -t \\
+        -n 1 \\
+        -l 15 \\
+        -e 99999 \\
+        -k 10 \\
+        --best \\
+        --chunkmbs 2048 \\
+        -q <(zcat $reads) \\
+        --un ${prefix}.hairpin_unmapped.fq \\
+        -S \\
+        | samtools view -bS - > ${prefix}.hairpin.bam
+
+    gzip ${prefix}.hairpin_unmapped.fq
+    """
+}
 
 
+/*
+ * STEP 5 - Post-alignment processing for miRBase mature and hairpin
+ */
+def wrap_mature_and_hairpin = { file ->
+    if ( file.contains("mature") ) return "miRBase_mature/$file"
+    if ( file.contains("hairpin") ) return "miRBase_hairpin/$file"
+}
+
+process miRBasePostAlignment {
+    publishDir "${params.outdir}/bowtie", mode: 'copy', saveAs: wrap_mature_and_hairpin
+
+    input:
+    file input from miRBase_mature_bam.mix(miRBase_hairpin_bam)
+
+    output:
+    file "${input.baseName}.count" into miRBase_counts
+    file "${input.baseName}.sorted.bam" into miRBase_bam
+    file "${input.baseName}.sorted.bam.bai" into miRBase_bai
+
+    script:
+    """
+    samtools sort ${input.baseName}.bam -o ${input.baseName}.sorted.bam
+    samtools index ${input.baseName}.sorted.bam
+    samtools idxstats ${input.baseName}.sorted.bam > ${input.baseName}.count
+    """
+}
 
 
+/*
+ * STEP 6 - edgeR miRBase feature counts processing
+ */
+process edgeR_miRBase {
+    publishDir "${params.outdir}/edgeR", mode: 'copy', saveAs: wrap_mature_and_hairpin
+
+    input:
+    file input_files from miRBase_counts.toSortedList()
+
+    output:
+    file '*.{txt,pdf}' into edgeR_miRBase_results
+
+    script:
+    """
+    edgeR_miRBase.r $params.rlocation $input_files
+    """
+}
+
+
+/*
+ * STEP 7.1 and 7.2 IF A GENOME SPECIFIED ONLY!
+ */
+if( params.gtf && params.bt2index) {
+
+    /*
+     * STEP 7.1 - Bowtie 2 against reference genome
+     */
+    process bowtie2 {
+        tag "$reads"
+        publishDir "${params.outdir}/bowtie2", mode: 'copy'
+
+        input:
+        file reads from trimmed_reads_bowtie2
+        file index from bt2_index
+        file bt2_indices
+
+        output:
+        file '*.bowtie2.bam' into bowtie2_bam
+        stdout into bowtie2_log
+
+        script:
+        index_base = index.toString() - '.1.bt2'
+        prefix = reads.toString() - ~/(.R1)?(_R1)?(_trimmed)?(\.fq)?(\.fastq)?(\.gz)?$/
+        """
+        bowtie2 \\
+            -x $index_base \\
+            -U $reads \\
+            -k 10 \\
+            --very-sensitive \\
+            -p 8 \\
+            -t \\
+            | samtools view -bT $index_base - > ${prefix}.bowtie2.bam
+        """
+    }
+
+
+    /*
+     * STEP 7.2 - NGI-Visualizations of Bowtie 2 alignment statistics
+     */
+    process ngi_visualizations {
+        tag "$bowtie2_bam"
+        publishDir "${params.outdir}/bowtie2/ngi_visualizations", mode: 'copy'
+
+        input:
+        file gtf from gtf
+        file bowtie2_bam
+
+        output:
+        file '*.{png,pdf}' into bowtie2_ngi_visualizations
+
+        script:
+        // Note! ngi_visualizations needs to be installed!
+        // See https://github.com/NationalGenomicsInfrastructure/ngi_visualizations
+        """
+        #!/usr/bin/env python
+        from ngi_visualizations.biotypes import count_biotypes
+        count_biotypes.main('$gtf','$bowtie2_bam')
+        """
+    }
+
+}
+
+
+/*
+ * STEP 8 - MultiQC
+ */
+process multiqc {
+    publishDir "${params.outdir}/MultiQC", mode: 'copy'
+
+    input:
+    file ('fastqc/*') from fastqc_results.flatten().toList()
+    file ('trim_galore/*') from trimgalore_results.flatten().toList()
+    file ('edgeR/*') from edgeR_miRBase_results.flatten().toList()
+    // if( params.gtf && params.bt2index) file ('bowtie2_log/*') from bowtie2_log.flatten().toList()
+
+    output:
+    file '*multiqc_report.html' into multiqc_html
+    file '*multiqc_data' into multiqc_data
+
+    script:
+    """
+    multiqc -f .
+    """
+}
